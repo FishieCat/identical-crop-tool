@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Identical Crop Tool</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 0;
+      padding: 1em;
+      background: #f4f4f4;
+    }
+
+    h1 {
+      text-align: center;
+    }
+
+    canvas,
+    img {
+      max-width: 100%;
+      height: auto;
+      image-rendering: pixelated;
+      border: 1px solid #ccc;
+    }
+
+    .controls {
+      margin: 1em 0;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 1em;
+    }
+
+    .zoom {
+      width: 320px;
+      height: 320px;
+      overflow: hidden;
+      border: 4px solid grey;
+      margin: 0.5em;
+      display: inline-block;
+    }
+
+    .zoom.active {
+      border-color: lightgreen;
+    }
+
+    .row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1em;
+    }
+
+    .info {
+      margin-top: 0.5em;
+      font-weight: bold;
+      text-align: center;
+    }
+
+    label,
+    select,
+    input {
+      margin-right: 0.5em;
+    }
+
+    .btns button {
+      margin-right: 0.5em;
+    }
+
+    #dropZone {
+      border: 2px dashed #aaa;
+      padding: 1em;
+      margin: 1em 0;
+      text-align: center;
+      background-color: #fff;
+      cursor: pointer;
+    }
+
+    #dropZone.hover {
+      border-color: #000;
+      background-color: #e0e0e0;
+    }
+
+    .nav-buttons {
+      text-align: center;
+      margin-bottom: 1em;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Identical Crop Tool</h1>
+  <div id="dropZone">Drop images here, or click to pick files</div>
+
+  <div class="controls">
+    <label for="format">Format:</label>
+    <select id="format">
+      <option value="png">PNG</option>
+      <option value="jpeg">JPG</option>
+      <option value="webp">WebP</option>
+    </select>
+    <label for="quality">Quality:</label>
+    <input type="range" id="quality" min="10" max="100" value="90">
+    <span id="qualityVal">90</span>
+    <button id="downloadZip">Download ZIP</button>
+    <button id="downloadAll">Download All</button>
+    <button id="reset">Reset</button>
+  </div>
+
+  <div class="row">
+    <div class="zoom" id="zoomTL"></div>
+    <div class="zoom" id="zoomBR"></div>
+  </div>
+
+  <div class="info" id="resolutionInfo">Output resolution: </div>
+
+  <div class="nav-buttons">
+    <button id="prevImg">Previous</button>
+    <span id="imageCounter">0 / 0</span>
+    <button id="nextImg">Next</button>
+  </div>
+
+  <canvas id="mainCanvas"></canvas>
+
+  <input type="file" id="fileInput" multiple accept="image/*" style="display:none">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script>
+    const canvas = document.getElementById('mainCanvas');
+    const ctx = canvas.getContext('2d');
+    const fileInput = document.getElementById('fileInput');
+    const dropZone = document.getElementById('dropZone');
+    const formatSelect = document.getElementById('format');
+    const qualitySlider = document.getElementById('quality');
+    const qualityVal = document.getElementById('qualityVal');
+    const resolutionInfo = document.getElementById('resolutionInfo');
+    const zoomTL = document.getElementById('zoomTL');
+    const zoomBR = document.getElementById('zoomBR');
+    const prevBtn = document.getElementById('prevImg');
+    const nextBtn = document.getElementById('nextImg');
+
+    let images = []; // { img, name }
+    let currentIndex = 0;
+    let crop = {
+      tl: { x: 10, y: 10 },
+      br: { x: null, y: null },
+    };
+    let activeCorner = 'tl';
+    let currentImage = null;
+
+    function loadSettings() {
+      const saved = localStorage.getItem('cropSettings');
+      if (saved) {
+        const obj = JSON.parse(saved);
+        crop = obj.crop;
+        formatSelect.value = obj.format;
+        qualitySlider.value = obj.quality;
+        qualityVal.textContent = obj.quality;
+        updateQualityState();
+      }
+    }
+
+    function saveSettings() {
+      localStorage.setItem('cropSettings', JSON.stringify({
+        crop,
+        format: formatSelect.value,
+        quality: qualitySlider.value
+      }));
+    }
+
+    function updateCanvas(img) {
+      canvas.width = img.width;
+      canvas.height = img.height;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, 0, 0);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      const { x: x1, y: y1 } = crop.tl;
+      const { x: x2, y: y2 } = crop.br;
+      ctx.beginPath();
+      ctx.rect(0, 0, canvas.width, canvas.height);
+      ctx.rect(x1, y1, x2 - x1, y2 - y1);
+      ctx.fill('evenodd');
+
+      updateZooms();
+      updateResolution();
+    }
+
+    function updateZoom(container, point) {
+      container.innerHTML = '';
+      const zoomCanvas = document.createElement('canvas');
+      zoomCanvas.width = 320;
+      zoomCanvas.height = 320;
+      const zctx = zoomCanvas.getContext('2d');
+      zctx.imageSmoothingEnabled = false;
+      zctx.drawImage(
+        canvas,
+        point.x - 16,
+        point.y - 16,
+        32,
+        32,
+        0,
+        0,
+        320,
+        320
+      );
+      container.appendChild(zoomCanvas);
+    }
+
+    function updateZooms() {
+      updateZoom(zoomTL, crop.tl);
+      updateZoom(zoomBR, crop.br);
+      zoomTL.classList.toggle('active', activeCorner === 'tl');
+      zoomBR.classList.toggle('active', activeCorner === 'br');
+    }
+
+    function updateResolution() {
+      if (!images.length) {
+        resolutionInfo.textContent = `Output resolution:`;
+        return;
+      }
+      const w = crop.br.x - crop.tl.x;
+      const h = crop.br.y - crop.tl.y;
+      const currentName = images[currentIndex]?.name || 'unknown';
+      resolutionInfo.textContent = `Output resolution: ${w} x ${h} (${currentName})`;
+    }
+
+    function updateNavStatus() {
+      const counter = document.getElementById('imageCounter');
+      counter.textContent = images.length > 0 ? `${currentIndex + 1} / ${images.length}` : '0 / 0';
+    }
+
+    function moveCorner(dx, dy) {
+      const corner = crop[activeCorner];
+      corner.x += dx;
+      corner.y += dy;
+      updateCanvas(currentImage);
+      saveSettings();
+    }
+
+    function cropImage(img) {
+      const w = crop.br.x - crop.tl.x;
+      const h = crop.br.y - crop.tl.y;
+      const tempCanvas = document.createElement('canvas');
+      tempCanvas.width = w;
+      tempCanvas.height = h;
+      const tctx = tempCanvas.getContext('2d');
+      tctx.drawImage(img, crop.tl.x, crop.tl.y, w, h, 0, 0, w, h);
+      return tempCanvas;
+    }
+
+    function showImage(index) {
+      currentIndex = (index + images.length) % images.length;
+      currentImage = images[currentIndex].img;
+      updateCanvas(currentImage);
+      updateNavStatus();
+    }
+
+    function handleFiles(files) {
+      images = [];
+      let loaded = 0;
+      const total = files.length;
+
+      [...files].forEach((file, i) => {
+        const img = new Image();
+
+        // Assign default filename if missing
+        const fileName = file.name || `pasted_image_${i + 1}.png`;
+
+        img.onload = () => {
+          images.push({ img, name: fileName });  // store original filename or default
+          loaded++;
+
+          if (loaded === total) {
+            if (!crop.br.x) crop.br.x = images[0].img.width - 10;
+            if (!crop.br.y) crop.br.y = images[0].img.height - 10;
+
+            showImage(0);
+          }
+        };
+        img.src = URL.createObjectURL(file);
+      });
+    }
+
+
+
+    canvas.addEventListener('click', e => {
+      const rect = canvas.getBoundingClientRect();
+      const x = Math.floor((e.clientX - rect.left) * canvas.width / rect.width);
+      const y = Math.floor((e.clientY - rect.top) * canvas.height / rect.height);
+      crop[activeCorner] = { x, y };
+      updateCanvas(currentImage);
+      saveSettings();
+    });
+
+    zoomTL.addEventListener('click', () => {
+      activeCorner = 'tl';
+      updateZooms();
+    });
+    zoomBR.addEventListener('click', () => {
+      activeCorner = 'br';
+      updateZooms();
+    });
+
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+    dropZone.addEventListener('dragover', e => {
+      e.preventDefault();
+      dropZone.classList.add('hover');
+    });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('hover'));
+    dropZone.addEventListener('drop', e => {
+      e.preventDefault();
+      dropZone.classList.remove('hover');
+      handleFiles(e.dataTransfer.files);
+    });
+
+    qualitySlider.addEventListener('input', () => {
+      qualityVal.textContent = qualitySlider.value;
+      saveSettings();
+    });
+
+    formatSelect.addEventListener('change', updateQualityState);
+
+    function updateQualityState() {
+      const isPng = formatSelect.value === 'png';
+      qualitySlider.disabled = isPng;
+      qualityVal.style.color = isPng ? '#aaa' : '#000';
+    }
+
+    document.getElementById('downloadAll').addEventListener('click', () => {
+      downloadAll(formatSelect.value, qualitySlider.value);
+    });
+
+    document.getElementById('downloadZip').addEventListener('click', () => {
+      downloadZip(formatSelect.value, qualitySlider.value);
+    });
+
+    document.getElementById('reset').addEventListener('click', () => {
+      localStorage.removeItem('cropSettings');
+      location.reload();
+    });
+
+    prevBtn.addEventListener('click', () => showImage(currentIndex - 1));
+    nextBtn.addEventListener('click', () => showImage(currentIndex + 1));
+
+    window.addEventListener('keydown', e => {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+        e.preventDefault();
+        const delta = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }[e.key];
+        moveCorner(...delta);
+      }
+    });
+
+    loadSettings();
+    updateQualityState();
+
+    function downloadAll(format, quality) {
+      images.forEach(({ img, name }, i) => {
+        const cropped = cropImage(img);
+        const baseName = name.replace(/\.[^/.]+$/, "");
+        const ext = format === 'jpeg' ? 'jpg' : format;
+        const fileName = `${baseName}_cropped.${ext}`;
+
+        cropped.toBlob(blob => {
+          const a = document.createElement('a');
+          a.href = URL.createObjectURL(blob);
+          a.download = fileName;
+          a.click();
+        }, `image/${format}`, quality / 100);
+      });
+    }
+
+    function downloadZip(format, quality) {
+      const zip = new JSZip();
+      let count = 0;
+
+      images.forEach(({ img, name }, i) => {
+        const cropped = cropImage(img);
+        const baseName = name.replace(/\.[^/.]+$/, "");
+        const ext = format === 'jpeg' ? 'jpg' : format;
+        const fileName = `${baseName}_cropped.${ext}`;
+
+        cropped.toBlob(blob => {
+          zip.file(fileName, blob);
+          count++;
+          if (count === images.length) {
+            zip.generateAsync({ type: 'blob', compression: 'STORE' }).then(content => {
+              const a = document.createElement('a');
+              a.href = URL.createObjectURL(content);
+              a.download = 'cropped_images.zip';
+              a.click();
+            });
+          }
+        }, `image/${format}`, quality / 100);
+      });
+    }
+
+    window.addEventListener('paste', (event) => {
+      const items = event.clipboardData.items;
+      const imageFiles = [];
+
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.type.indexOf('image') !== -1) {
+          const blob = item.getAsFile();
+          if (blob) imageFiles.push(blob);
+        }
+      }
+
+      if (imageFiles.length > 0) {
+        // Use your existing handleFiles to add these images
+        handleFiles(imageFiles);
+      }
+    });
+
+  </script>
+</body>
+
+</html>
